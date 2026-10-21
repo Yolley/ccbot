@@ -20,6 +20,7 @@ ccbot hook --install                  # Auto-install Claude Code SessionStart ho
 - **Topic-only** — no backward-compat for non-topic mode. No `active_sessions`, no `/list`, no General topic routing.
 - **No message truncation** at parse layer — splitting only at send layer (`split_message`, 4096 char limit).
 - **MarkdownV2 only** — use `safe_reply`/`safe_edit`/`safe_send` helpers (auto fallback to plain text). Internal queue/UI code calls bot API directly with its own fallback.
+- **Multi-line injection via paste buffer** — plain keystrokes submit at every newline, so multi-line prompts (text-file attachments) go through `tmux load-buffer` + `paste-buffer -p` (bracketed paste), then a separate Enter. CR/CRLF must be normalized to `\n` first.
 - **Hook-based session tracking** — `SessionStart` hook writes `session_map.json`; monitor polls it to detect session changes.
 - **Message queue per user** — FIFO ordering, message merging (3800 char limit), tool_use/tool_result pairing.
 - **Rate limiting** — `AIORateLimiter(max_retries=5)` on the Application (30/s global). On restart, the global bucket is pre-filled to avoid burst against Telegram's server-side counter.

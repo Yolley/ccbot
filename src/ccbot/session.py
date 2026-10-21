@@ -946,6 +946,27 @@ class SessionManager:
             return True, f"Sent to {display}"
         return False, "Failed to send keys"
 
+    async def paste_to_window(self, window_id: str, text: str) -> tuple[bool, str]:
+        """Paste multi-line text into a tmux window by ID, then submit.
+
+        Unlike send_to_window, line breaks are preserved (bracketed paste),
+        so the whole text arrives as one prompt.
+        """
+        display = self.get_display_name(window_id)
+        logger.debug(
+            "paste_to_window: window_id=%s (%s), text_len=%d",
+            window_id,
+            display,
+            len(text),
+        )
+        window = await tmux_manager.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)"
+        success = await tmux_manager.paste_text(window.window_id, text)
+        if success:
+            return True, f"Pasted to {display}"
+        return False, "Failed to paste text"
+
     # --- Message history ---
 
     async def get_recent_messages(

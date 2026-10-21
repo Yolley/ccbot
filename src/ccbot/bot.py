@@ -14,6 +14,8 @@ Core responsibilities:
     to Claude Code as file paths (photo_handler).
   - Voice handling: voice messages are transcribed via OpenAI API and
     forwarded as text (voice_handler).
+  - Text file handling: .txt/.md attachments are relayed as a prompt via
+    bracketed paste, preserving line breaks (document_handler).
   - Automatic cleanup: closing a topic kills the associated window
     (topic_closed_handler). Unsupported content (stickers, etc.)
     is rejected with a warning (unsupported_content_handler).
@@ -35,6 +37,7 @@ Key functions: create_bot(), handle_new_message().
 import asyncio
 import io
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -554,7 +557,8 @@ async def unsupported_content_handler(
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
         update.message,
-        "⚠ Only text, photo, and voice messages are supported. Stickers, video, and other media cannot be forwarded to Claude Code.",
+        "⚠ Only text, photo, voice, and plain-text file messages are supported. "
+        "Stickers, video, and other media cannot be forwarded to Claude Code.",
     )
 
 
@@ -714,6 +718,170 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await safe_reply(update.message, f'🎤 "{text}"')
+
+
+# --- Text file (document) relay ---
+
+_FILES_DIR = ccbot_dir() / "files"
+_FILES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Extensions accepted as plain text (in addition to any text/* mime type)
+TEXT_FILE_EXTENSIONS = {".txt", ".md", ".markdown", ".log"}
+# Content up to this length is relayed inline as the prompt itself; longer
+# files are saved to disk and referenced by path so Claude reads them itself.
+MAX_INLINE_TEXT_CHARS = 20_000
+# Refuse to download anything bigger than this (bots can fetch up to 20 MB)
+MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024
+
+
+def _is_text_document(file_name: str, mime_type: str) -> bool:
+    """Whether an attached document looks like plain text."""
+    if mime_type.lower().startswith("text/"):
+        return True
+    return Path(file_name).suffix.lower() in TEXT_FILE_EXTENSIONS
+
+
+def _safe_file_name(file_name: str) -> str:
+    """Flatten a Telegram-supplied filename into a safe basename."""
+    base = Path(file_name).name or "file.txt"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", base)[:120]
+
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle text files (.txt): relay their contents as a prompt.
+
+    The file content is pasted into the window as a single prompt (line breaks
+    preserved); an optional caption is prepended as an instruction. Files
+    larger than MAX_INLINE_TEXT_CHARS are saved under ~/.ccbot/files and
+    forwarded as a path for Claude to read.
+    """
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        if update.message:
+            await safe_reply(update.message, "You are not authorized to use this bot.")
+        return
+
+    if not update.message or not update.message.document:
+        return
+
+    doc = update.message.document
+
+    chat = update.message.chat
+    thread_id = _get_thread_id(update)
+    if chat.type in ("group", "supergroup") and thread_id is not None:
+        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
+
+    file_name = doc.file_name or "file.txt"
+    mime_type = doc.mime_type or ""
+    if not _is_text_document(file_name, mime_type):
+        hint = (
+            " Send images as a photo instead."
+            if mime_type.lower().startswith("image/")
+            else ""
+        )
+        await safe_reply(
+            update.message,
+            f"⚠ '{file_name}' is not a text file. "
+            f"Only plain-text files (.txt, .md, .log) can be relayed as a prompt.{hint}",
+        )
+        return
+
+    # Must be in a named topic
+    if thread_id is None:
+        await safe_reply(
+            update.message,
+            "❌ Please use a named topic. Create a new topic to start a session.",
+        )
+        return
+
+    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    if wid is None:
+        await safe_reply(
+            update.message,
+            "❌ No session bound to this topic. Send a text message first to create one.",
+        )
+        return
+
+    w = await tmux_manager.find_window_by_id(wid)
+    if not w:
+        display = session_manager.get_display_name(wid)
+        session_manager.unbind_thread(user.id, thread_id)
+        await safe_reply(
+            update.message,
+            f"❌ Window '{display}' no longer exists. Binding removed.\n"
+            "Send a message to start a new session.",
+        )
+        return
+
+    if doc.file_size and doc.file_size > MAX_TEXT_FILE_BYTES:
+        await safe_reply(
+            update.message,
+            f"⚠ '{file_name}' is too large "
+            f"({doc.file_size // 1024} KB, limit {MAX_TEXT_FILE_BYTES // 1024} KB).",
+        )
+        return
+
+    tg_file = await doc.get_file()
+    raw = bytes(await tg_file.download_as_bytearray())
+
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        await safe_reply(
+            update.message,
+            f"⚠ '{file_name}' is not valid UTF-8 text and cannot be relayed.",
+        )
+        return
+
+    # Normalize line endings — a bare CR submits the prompt in Claude's TUI
+    content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not content:
+        await safe_reply(update.message, f"⚠ '{file_name}' is empty.")
+        return
+
+    caption = (update.message.caption or "").strip()
+    oversized = len(content) > MAX_INLINE_TEXT_CHARS
+    if oversized:
+        # Too long to paste as a prompt — hand Claude the file instead
+        file_path = _FILES_DIR / f"{int(time.time())}_{_safe_file_name(file_name)}"
+        file_path.write_text(content, encoding="utf-8")
+        text_to_send = f"(text file attached: {file_path})"
+        if caption:
+            text_to_send = f"{caption}\n\n{text_to_send}"
+    else:
+        text_to_send = f"{caption}\n\n{content}" if caption else content
+
+    try:
+        await update.message.chat.send_action(ChatAction.TYPING)
+    except Exception as e:
+        logger.warning("send_action(TYPING) failed, continuing to injection: %s", e)
+    clear_status_msg_info(user.id, thread_id)
+
+    logger.info(
+        "Relaying text file '%s' to window %s (chars=%d, oversized=%s, user=%d)",
+        file_name,
+        wid,
+        len(content),
+        oversized,
+        user.id,
+    )
+    success, message = await session_manager.paste_to_window(wid, text_to_send)
+    if not success:
+        await safe_reply(update.message, f"❌ {message}")
+        return
+
+    if oversized:
+        await safe_reply(
+            update.message,
+            f"📄 '{file_name}' is {len(content)} chars — saved and sent as a file "
+            "path for Claude to read.",
+        )
+    else:
+        lines = content.count("\n") + 1
+        await safe_reply(
+            update.message,
+            f"📄 Sent prompt from '{file_name}' ({lines} lines, {len(content)} chars).",
+        )
 
 
 # Active bash capture tasks: (user_id, thread_id) → asyncio.Task
@@ -1940,6 +2108,8 @@ def create_bot() -> Application:
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     # Voice: transcribe via OpenAI and forward text to Claude Code
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
+    # Documents: relay plain-text file contents as a prompt
+    application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     # Catch-all: non-text content (stickers, video, etc.)
     application.add_handler(
         MessageHandler(

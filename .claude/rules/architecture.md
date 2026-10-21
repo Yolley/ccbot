@@ -8,6 +8,7 @@
 │  - /screenshot: Capture tmux pane as PNG                           │
 │  - /esc: Send Escape to interrupt Claude                           │
 │  - Send text → Claude Code via tmux keystrokes                     │
+│  - .txt/.md attachment → prompt via tmux paste buffer              │
 │  - Forward /commands to Claude Code                                │
 │  - Create sessions via directory browser in unbound topics         │
 │  - Tool use → tool result: edit message in-place                   │
@@ -30,9 +31,9 @@
 │  SessionMonitor         │    │  TmuxManager (tmux_manager.py)  │
 │  (session_monitor.py)   │    │  - list/find/create/kill windows│
 │  - Poll JSONL every 2s  │    │  - send_keys to pane            │
-│  - Detect mtime changes │    │  - capture_pane for screenshot  │
-│  - Parse new lines      │    └──────────────┬─────────────────┘
-│  - Track pending tools  │                   │
+│  - Detect mtime changes │    │  - paste_text (bracketed paste) │
+│  - Parse new lines      │    │  - capture_pane for screenshot  │
+│  - Track pending tools  │    └──────────────┬─────────────────┘
 │    across poll cycles   │                   │
 └──────────┬──────────────┘                   │
            │                                  │

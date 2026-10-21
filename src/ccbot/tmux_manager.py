@@ -4,6 +4,7 @@ Wraps libtmux to provide async-friendly operations on a single tmux session:
   - list_windows / find_window_by_name: discover Claude Code windows.
   - capture_pane: read terminal content (plain or with ANSI colors).
   - send_keys: forward user input or control keys to a window.
+  - paste_text: inject multi-line text via a tmux paste buffer.
   - create_window / kill_window: lifecycle management.
 
 All blocking libtmux calls are wrapped in asyncio.to_thread().
@@ -15,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -329,6 +332,104 @@ class TmuxManager:
                 return False
 
         return await asyncio.to_thread(_sync_send_keys)
+
+    def _resolve_pane(self, window_id: str) -> libtmux.Pane | None:
+        """Resolve a window ID to its active pane (None if unavailable)."""
+        session = self.get_session()
+        if not session:
+            logger.error("No tmux session found")
+            return None
+        try:
+            window = session.windows.get(window_id=window_id)
+        except Exception as e:
+            logger.error("Failed to look up window %s: %s", window_id, e)
+            return None
+        if not window:
+            logger.error("Window %s not found", window_id)
+            return None
+        pane = window.active_pane
+        if not pane:
+            logger.error("No active pane in window %s", window_id)
+        return pane
+
+    async def paste_text(self, window_id: str, text: str, enter: bool = True) -> bool:
+        """Paste text into a window through a tmux buffer, then submit.
+
+        Unlike send_keys, line breaks survive: the text is loaded into a tmux
+        paste buffer and pasted with bracketed-paste markers, so Claude Code's
+        TUI takes it as one pasted block instead of submitting at every
+        newline.  Used to relay text-file contents as a single prompt.
+
+        Args:
+            window_id: The window ID to paste into
+            text: Text to paste (may be multi-line)
+            enter: Whether to press Enter after the paste
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Buffer names may not contain tmux target characters like "@"
+        buffer_name = f"ccbot-paste-{re.sub(r'[^0-9A-Za-z]', '', window_id)}"
+
+        def _sync_paste() -> bool:
+            pane = self._resolve_pane(window_id)
+            if not pane:
+                return False
+
+            fd, tmp_name = tempfile.mkstemp(prefix="ccbot-paste-", suffix=".txt")
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(text)
+                proc = self.server.cmd("load-buffer", "-b", buffer_name, str(tmp_path))
+                if proc.stderr:
+                    logger.error("tmux load-buffer failed: %s", proc.stderr)
+                    return False
+            except Exception as e:
+                logger.error("Failed to stage paste buffer for %s: %s", window_id, e)
+                return False
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+            try:
+                # -p wraps the paste in bracketed-paste markers, -d drops the
+                # buffer afterwards.
+                proc = pane.cmd("paste-buffer", "-b", buffer_name, "-d", "-p")
+                if proc.stderr:
+                    # Older tmux without -p: paste raw rather than fail outright.
+                    logger.warning(
+                        "tmux paste-buffer -p failed (%s), retrying unbracketed",
+                        proc.stderr,
+                    )
+                    proc = pane.cmd("paste-buffer", "-b", buffer_name, "-d")
+                    if proc.stderr:
+                        logger.error("tmux paste-buffer failed: %s", proc.stderr)
+                        self.server.cmd("delete-buffer", "-b", buffer_name)
+                        return False
+                return True
+            except Exception as e:
+                logger.error("Failed to paste into window %s: %s", window_id, e)
+                return False
+
+        def _send_enter() -> bool:
+            pane = self._resolve_pane(window_id)
+            if not pane:
+                return False
+            try:
+                pane.send_keys("", enter=True, literal=False)
+                return True
+            except Exception as e:
+                logger.error("Failed to send Enter to window %s: %s", window_id, e)
+                return False
+
+        if not await asyncio.to_thread(_sync_paste):
+            return False
+        if not enter:
+            return True
+        # Let the TUI ingest the paste before Enter arrives, or it is taken as
+        # part of the pasted block.  Larger pastes need longer.
+        await asyncio.sleep(min(2.0, 0.5 + len(text) / 20000))
+        return await asyncio.to_thread(_send_enter)
 
     async def rename_window(self, window_id: str, new_name: str) -> bool:
         """Rename a tmux window by its ID."""

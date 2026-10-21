@@ -27,6 +27,7 @@ In fact, CCBot itself was built this way — iterating on itself through Claude 
 - **Real-time notifications** — Get Telegram messages for assistant responses, thinking content, tool use/result, and local command output
 - **Interactive UI** — Navigate AskUserQuestion, ExitPlanMode, and Permission Prompts via inline keyboard
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
+- **Text file prompts** — Send a `.txt`/`.md` file and its contents are relayed as one prompt (line breaks preserved)
 - **Send messages** — Forward text to Claude Code via tmux keystrokes
 - **Slash command forwarding** — Send any `/command` directly to Claude Code (e.g. `/clear`, `/compact`, `/cost`)
 - **Create new sessions** — Start Claude Code sessions from Telegram via directory browser
@@ -179,6 +180,10 @@ Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/revie
 **Sending messages:**
 
 Once a topic is bound to a session, just send text or voice messages in that topic — text gets forwarded to Claude Code via tmux keystrokes, and voice messages are automatically transcribed and forwarded as text.
+
+**Sending a long prompt as a file:**
+
+Attach a plain-text file (`.txt`, `.md`, `.log`, or any `text/*` document) to bypass Telegram's 4096-character message limit. The file contents are pasted into the session as a single prompt with line breaks intact; an optional caption is prepended as an instruction. Files over 20,000 characters are saved to `~/.ccbot/files/` and forwarded as a path for Claude to read instead.
 
 **Killing a session:**
 
