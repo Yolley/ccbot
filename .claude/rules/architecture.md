@@ -71,6 +71,9 @@
 Additional modules:
   screenshot.py       ─ Terminal text → PNG rendering (ANSI color, font fallback)
   transcribe.py       ─ Voice-to-text transcription via OpenAI API (gpt-4o-transcribe)
+  claude_config.py    ─ Pre-trust a directory in ~/.claude.json before launching
+                        claude, so the workspace trust dialog can't block a new
+                        session (CCBOT_AUTO_TRUST_DIRS)
   main.py             ─ CLI entry point
   utils.py            ─ Shared utilities (ccbot_dir, atomic_write_json)
 
